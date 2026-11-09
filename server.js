@@ -259,6 +259,10 @@ function initDb() {
         receipt_header TEXT,
         receipt_footer TEXT
       );
+      CREATE TABLE IF NOT EXISTS settings_kv (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      );
     `);
     const count = db.prepare('SELECT COUNT(*) as c FROM settings').get();
     if (count.c === 0) {
@@ -290,16 +294,29 @@ function initDb() {
 initDb();
 
 function getSettings() {
-  if (useJsonDb) return jsonDb.settings;
-  return db.prepare('SELECT * FROM settings WHERE id=1').get();
+  if (useJsonDb) {
+    const kv = {};
+    try { (jsonDb.settings_kv||[]).forEach(r=>kv[r.key]=r.value); } catch(e) {}
+    return Object.assign({}, jsonDb.settings, kv);
+  }
+  const row = db.prepare('SELECT * FROM settings WHERE id=1').get();
+  const kv = {};
+  try { db.prepare('SELECT key, value FROM settings_kv').all().forEach(r=>kv[r.key]=r.value); } catch(e) {}
+  return Object.assign({}, row, kv);
 }
 function updateSettings(patch) {
   const s = getSettings();
-  const merged = { ...s, ...patch };
+  const kvKeys = ['stripe_secret_key','stripe_publishable_key'];
+  const kvPatch = {};
+  kvKeys.forEach(k=>{ if(patch[k]!=null){ kvPatch[k]=patch[k]; delete patch[k]; } });
+  const merged = { ...s, ...patch, ...kvPatch };
   if (useJsonDb) {
-    jsonDb.settings = merged;
+    jsonDb.settings = Object.assign({}, jsonDb.settings, patch);
+    jsonDb.settings_kv = jsonDb.settings_kv || [];
+    Object.keys(kvPatch).forEach(k=>{ const r=jsonDb.settings_kv.find(x=>x.key===k); if(r) r.value=kvPatch[k]; else jsonDb.settings_kv.push({key:k,value:kvPatch[k]}); });
     saveJsonDb();
   } else {
+    Object.keys(kvPatch).forEach(k=>{ db.prepare('INSERT INTO settings_kv (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, kvPatch[k]); });
     db.prepare(`UPDATE settings SET adyen_api_key=?, adyen_merchant_account=?, adyen_client_key=?, adyen_hmac_key=?, adyen_env=?, adyen_terminal_id=?, store_name=?, tax_rate=?, currency=?, receipt_header=?, receipt_footer=? WHERE id=1`).run(
       merged.adyen_api_key, merged.adyen_merchant_account, merged.adyen_client_key, merged.adyen_hmac_key, merged.adyen_env, merged.adyen_terminal_id, merged.store_name, merged.tax_rate, merged.currency, merged.receipt_header, merged.receipt_footer
     );
@@ -719,6 +736,7 @@ app.get('/api/settings', (req, res) => {
   const safe = { ...s };
   if (safe.adyen_api_key) safe.adyen_api_key = safe.adyen_api_key.slice(0, 8) + '••••' + safe.adyen_api_key.slice(-4);
   if (safe.adyen_hmac_key) safe.adyen_hmac_key = safe.adyen_hmac_key.slice(0, 6) + '••••';
+  if (safe.stripe_secret_key) safe.stripe_secret_key = safe.stripe_secret_key.slice(0, 7) + '••••';
   const cfg = adyenConfig();
   safe.adyen_configured = cfg.configured;
   safe.adyen_env = cfg.env;
@@ -728,9 +746,10 @@ app.get('/api/settings/raw', authRequired, roleRequired('admin'), (req, res) => 
   res.json(getSettings());
 });
 app.put('/api/settings', authRequired, roleRequired('admin'), (req, res) => {
-  const allowed = ['adyen_api_key','adyen_merchant_account','adyen_client_key','adyen_hmac_key','adyen_env','adyen_terminal_id','store_name','tax_rate','currency','receipt_header','receipt_footer'];
+  const allowed = ['adyen_api_key','adyen_merchant_account','adyen_client_key','adyen_hmac_key','adyen_env','adyen_terminal_id','store_name','tax_rate','currency','receipt_header','receipt_footer','stripe_secret_key','stripe_publishable_key'];
   const patch = {};
   for (const k of allowed) if (req.body[k] != null) patch[k] = req.body[k];
+  ['stripe_secret_key'].forEach(k=>{ if(patch[k] && patch[k].indexOf('\u2022\u2022\u2022\u2022') !== -1) delete patch[k]; });
   if (patch.tax_rate != null) patch.tax_rate = Number(patch.tax_rate);
   const updated = updateSettings(patch);
   res.json(updated);
@@ -910,17 +929,103 @@ app.get('/api/qr/list', (req, res) => {
   const out = list.map(s=> ({ ...s, items: typeof s.items==='string'? JSON.parse(s.items): s.items })).slice(0,100);
   res.json(out);
 });
-app.get('/api/qr/:id', (req, res) => {
+app.get('/api/qr/:id', async (req, res) => {
   const s = dbGet('SELECT * FROM qr_sessions WHERE id=?', [req.params.id]);
   if (!s) return res.status(404).json({ error: 'QR session not found or expired' });
   s.items = typeof s.items === 'string' ? JSON.parse(s.items) : s.items;
   if (s.adyen_session_data) try { s.adyen_session_data = JSON.parse(s.adyen_session_data); } catch {}
+  // Stripe online sessions: auto-verify with Stripe while staff polls (payment detected even if customer never returns)
+  if (s.status === 'pending' && s.adyen_session_data && s.adyen_session_data.stripe) { await stripeMaybeVerify(s); }
   // Check expiry
   if (new Date(s.expires_at) < new Date() && s.status === 'pending') {
     dbRun('UPDATE qr_sessions SET status=?, adyen_session_data=? WHERE id=?', ['expired', s.adyen_session_data ? JSON.stringify(s.adyen_session_data) : '{}', s.id]);
     s.status = 'expired';
   }
   res.json(s);
+});
+
+// --- Stripe online payments (test mode ready; webhooks optional - verified on poll) ---
+function stripeKey(){ const s = getSettings(); return s.stripe_secret_key || process.env.STRIPE_SECRET_KEY || ''; }
+function stripeBase(){ return process.env.STRIPE_API_BASE || 'https://api.stripe.com'; }
+function stripeEncode(obj){ return Object.keys(obj).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(obj[k])).join('&'); }
+async function stripeCreateCheckout(opts){
+  const key = stripeKey();
+  if(!key) { const e = new Error('Stripe not configured - add your sk_test key in Settings, Payments, Stripe'); e.code='STRIPE_OFFLINE'; throw e; }
+  const p = { mode:'payment', success_url: opts.successUrl, cancel_url: opts.cancelUrl, client_reference_id: opts.reference, 'metadata[qr_id]': opts.qrId };
+  if(opts.customerEmail) p.customer_email = opts.customerEmail;
+  (opts.items||[]).slice(0,20).forEach((it,i)=>{
+    p['line_items['+i+'][quantity]'] = String(Math.max(1, Number(it.qty)||1));
+    p['line_items['+i+'][price_data][currency]'] = (opts.currency||'usd').toLowerCase();
+    p['line_items['+i+'][price_data][unit_amount]'] = String(Math.round(Number(it.price)*100));
+    p['line_items['+i+'][price_data][product_data][name]'] = String(it.name||'Item').slice(0,120);
+  });
+  const res = await fetch(stripeBase()+'/v1/checkout/sessions', { method:'POST', headers:{ Authorization:'Bearer '+key, 'Content-Type':'application/x-www-form-urlencoded' }, body: stripeEncode(p) });
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok){ const e = new Error((data && data.error && data.error.message) || ('Stripe error '+res.status)); e.code='STRIPE_API'; throw e; }
+  return data;
+}
+async function stripeRetrieveSession(sid){
+  const key = stripeKey();
+  if(!key || !sid) return null;
+  try {
+    const res = await fetch(stripeBase()+'/v1/checkout/sessions/'+encodeURIComponent(sid), { headers:{ Authorization:'Bearer '+key }, signal: AbortSignal.timeout(6000) });
+    if(!res.ok) return null;
+    return await res.json();
+  } catch(e) { return null; }
+}
+async function stripeMaybeVerify(s){
+  try{
+    const d = (s.adyen_session_data && typeof s.adyen_session_data==='object') ? s.adyen_session_data : null;
+    if(!d || !d.stripe || !d.stripe.id || s.status!=='pending') return s;
+    const sess = await stripeRetrieveSession(d.stripe.id);
+    if(sess && sess.payment_status==='paid'){
+      dbRun('UPDATE qr_sessions SET status=?, adyen_session_data=? WHERE id=?', ['paid', JSON.stringify(Object.assign({}, d, { stripe_payment: { id: sess.id, amount_total: sess.amount_total, payment_intent: sess.payment_intent } })), s.id]);
+      const txId = uuid(); const now = new Date().toISOString();
+      const itemsArr = typeof s.items==='string' ? JSON.parse(s.items) : (s.items||[]);
+      const subtotal = itemsArr.reduce((a,i)=>a+Number(i.price)*Number(i.qty),0);
+      const taxRate = Number(getSettings().tax_rate||8.5);
+      const tax = subtotal*(taxRate/100); const total = subtotal+tax;
+      dbRun('INSERT INTO transactions (id, reference, amount, currency, status, payment_method, terminal_id, qr_session_id, items, subtotal, tax, discount, total, cashier_id, cashier_name, customer_name, customer_email, adyen_psp, adyen_response, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        [txId, s.reference, s.amount, s.currency, 'captured', 'stripe', null, s.id, JSON.stringify(itemsArr), subtotal, tax, 0, total, null, 'Stripe Online', '', s.customer_email||'', String(sess.payment_intent || sess.id), JSON.stringify(sess).slice(0,3000), now, now]);
+      s.status='paid';
+    }
+  }catch(e){}
+  return s;
+}
+app.post('/api/stripe/checkout', authRequired, async (req, res) => {
+  try{
+    const body = req.body || {};
+    if(!body.amount) return res.status(400).json({ error:'amount required (in cents)' });
+    const amountCents = Math.round(Number(body.amount));
+    const cur = body.currency || getSettings().currency || 'USD';
+    const id = uuid();
+    const reference = 'SRF-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).slice(2,6).toUpperCase();
+    const now = new Date().toISOString();
+    const expires_at = new Date(Date.now() + 24*60*60*1000).toISOString();
+    const host = req.headers.host;
+    const protocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+    const origin = protocol + '://' + host;
+    const sess = await stripeCreateCheckout({ amountCents, currency: cur, items: body.items||[], successUrl: origin+'/pay/'+id+'?stripe=return', cancelUrl: origin+'/pay/'+id+'?stripe=cancel', reference, qrId: id, customerEmail: body.customerEmail });
+    dbRun('INSERT INTO qr_sessions (id, reference, amount, currency, status, items, customer_email, adyen_session_data, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      [id, reference, amountCents, cur, 'pending', JSON.stringify(body.items||[]), body.customerEmail||'', JSON.stringify({ stripe: { id: sess.id, url: sess.url } }), now, expires_at]);
+    let qrDataUrl = null;
+    try { qrDataUrl = await QRCode.toDataURL(sess.url, { width: 300, margin: 1 }); } catch(e) {}
+    res.json({ id, reference, amount: amountCents, currency: cur, provider:'stripe', payUrl: sess.url, qrDataUrl, expires_at });
+  }catch(e){
+    res.status(e.code==='STRIPE_OFFLINE' ? 503 : 502).json({ error: e.message, code: e.code||'STRIPE_ERROR' });
+  }
+});
+app.post('/api/stripe/verify', async (req, res) => {
+  const id = req.body && req.body.id;
+  if(!id) return res.status(400).json({ error:'id required' });
+  const s = dbGet('SELECT * FROM qr_sessions WHERE id=?', [id]);
+  if(!s) return res.status(404).json({ error:'not found' });
+  if(s.status==='pending'){
+    s.items = typeof s.items==='string' ? JSON.parse(s.items) : s.items;
+    if(s.adyen_session_data) try{ s.adyen_session_data = JSON.parse(s.adyen_session_data); }catch(e){}
+    await stripeMaybeVerify(s);
+  }
+  res.json({ id, status: s.status });
 });
 
 // Adyen webhook for Drop-in / Sessions - verifies HMAC and updates qr_sessions + creates transaction
