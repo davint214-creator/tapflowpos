@@ -551,25 +551,33 @@ app.get('/api/auth/me', authRequired, (req, res) => {
 // Users CRUD (admin/manager)
 app.get('/api/stats/overview', authRequired, roleRequired('admin','manager'), (req, res) => {
   // Manager-only: daily revenue + graphs. Aggregated from transactions, only captured counts for revenue.
+  // All day buckets use the store's LOCAL timezone (APP_TIMEZONE, default America/Chicago) —
+  // bucketing by UTC made evening sales land on the next day's bar and "Today" miss them.
+  const TZ = process.env.APP_TIMEZONE || 'America/Chicago';
+  const dFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year:'numeric', month:'2-digit', day:'2-digit' });
+  const mFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year:'numeric', month:'2-digit' });
+  const localDateKey = d => dFmt.format(d instanceof Date ? d : new Date(d)); // YYYY-MM-DD
+  const localMonthKey = d => mFmt.format(d instanceof Date ? d : new Date(d)); // YYYY-MM
   const txs = dbAll('SELECT * FROM transactions ORDER BY created_at DESC');
   const now = new Date();
-  const startOfToday = new Date(now); startOfToday.setHours(0,0,0,0);
-  const startOfWeek = new Date(now); startOfWeek.setDate(now.getDate()-6); startOfWeek.setHours(0,0,0,0);
+  const todayKey = localDateKey(now);
+  const monthKey = localMonthKey(now);
+  const dayKeys = [];
+  for(let i=6;i>=0;i--){ const d=new Date(now); d.setDate(now.getDate()-i); dayKeys.push(localDateKey(d)); }
   const byDay = {};
-  for(let i=0;i<7;i++){ const d=new Date(startOfWeek); d.setDate(startOfWeek.getDate()+i); const key=d.toISOString().slice(0,10); byDay[key]={date:key, revenue:0, count:0, captured:0}; }
-  let todayRevenue=0, todayCount=0, weekRevenue=0, monthRevenue=0;
+  dayKeys.forEach(k=>{ byDay[k]={date:k, revenue:0, count:0, captured:0}; });
+  let todayRevenue=0, todayCount=0, monthRevenue=0;
   let byMethod={}, byCategory={}, byLocation={}, topProducts={};
   txs.forEach(t=>{
-    const d = (t.created_at||'').slice(0,10);
+    const d = t.created_at ? localDateKey(t.created_at) : '';
     const total = Number(t.total||0);
     const isCaptured = t.status==='captured';
     if(isCaptured){
-      if(d===startOfToday.toISOString().slice(0,10)){ todayRevenue+=total; todayCount+=1; }
-      const txDate = new Date(t.created_at);
-      if(txDate>=startOfWeek) weekRevenue+=total;
-      if((t.created_at||'').slice(0,7)===now.toISOString().slice(0,7)) monthRevenue+=total;
+      if(byDay[d]) byDay[d].revenue+=total;
+      if(d===todayKey){ todayRevenue+=total; todayCount+=1; }
+      if(d.slice(0,7)===monthKey) monthRevenue+=total;
     }
-    if(byDay[d]){ byDay[d].count+=1; if(isCaptured){ byDay[d].revenue+=total; byDay[d].captured+=1; } }
+    if(byDay[d]){ byDay[d].count+=1; if(isCaptured){ byDay[d].captured+=1; } }
     const m=(t.payment_method||'unknown').toLowerCase();
     byMethod[m]=(byMethod[m]||0)+ (isCaptured? total: 0);
     // items for category/location/product
@@ -586,13 +594,14 @@ app.get('/api/stats/overview', authRequired, roleRequired('admin','manager'), (r
       });
     }catch{}
   });
-  const daily = Object.values(byDay);
+  const daily = dayKeys.map(k=>byDay[k]);
+  const weekRevenue = dayKeys.reduce((a,k)=>a+byDay[k].revenue,0);
   const totalRevenue = txs.filter(t=>t.status==='captured').reduce((a,t)=>a+Number(t.total||0),0);
   const totalCaptured = txs.filter(t=>t.status==='captured').length;
   const totalRefunded = txs.filter(t=>t.status==='refunded').length;
   const pending = txs.filter(t=>['pending','error'].includes(t.status)).length;
   const topList = Object.entries(topProducts).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([name,qty])=>({name, qty}));
-  res.json({ todayRevenue, todayCount, weekRevenue, monthRevenue, totalRevenue, totalCaptured, totalRefunded, pending, daily, byMethod, byCategory, byLocation, topProducts: topList, totalTx: txs.length });
+  res.json({ todayRevenue, todayCount, weekRevenue, monthRevenue, totalRevenue, totalCaptured, totalRefunded, pending, daily, byMethod, byCategory, byLocation, topProducts: topList, totalTx: txs.length, timezone: TZ });
 });
 
 app.get('/api/users', authRequired, roleRequired('admin', 'manager'), (req, res) => {
@@ -1123,8 +1132,147 @@ app.post('/api/qr/:id/mark-paid', authRequired, (req, res) => {
   res.json({ ok: true, status: 'paid' });
 });
 
+// ============ EMAIL RECEIPTS (nodemailer + SMTP from .env) ============
+function smtpConfig(){
+  const host = process.env.SMTP_HOST || '';
+  const port = Number(process.env.SMTP_PORT || 587);
+  const user = process.env.SMTP_USER || '';
+  const pass = process.env.SMTP_PASS || '';
+  const from = process.env.SMTP_FROM || (user ? `TapFlow <${user}>` : 'receipts@tapflow.local');
+  const secure = process.env.SMTP_SECURE == null || process.env.SMTP_SECURE === ''
+    ? port === 465
+    : String(process.env.SMTP_SECURE).toLowerCase() === 'true';
+  // SMTP_DRIVER=json is a debug mode: emails are logged to the console instead of really sent.
+  const driver = String(process.env.SMTP_DRIVER || '').toLowerCase();
+  return { host, port, user, pass, from, secure, driver, configured: driver === 'json' || (!!host && !!user && !!pass) };
+}
+let _mailer = null;
+function getMailer(){
+  const cfg = smtpConfig();
+  if (!cfg.configured) return null;
+  if (_mailer) return _mailer;
+  try{
+    const nodemailer = require('nodemailer');
+    _mailer = cfg.driver === 'json'
+      ? nodemailer.createTransport({ jsonTransport: true })
+      : nodemailer.createTransport({ host: cfg.host, port: cfg.port, secure: cfg.secure, auth: { user: cfg.user, pass: cfg.pass } });
+    return _mailer;
+  }catch(e){ console.error('[email] nodemailer not installed — run: npm install', e.message); return null; }
+}
+function escHtml(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function buildReceiptEmailHTML(t){
+  const s = getSettings();
+  const store = s.store_name || 'TapFlow';
+  const head = s.receipt_header || store;
+  const foot = s.receipt_footer || 'Thank you! Visit again';
+  const items = t.items || [];
+  const sub = t.subtotal != null ? Number(t.subtotal) : (Number(t.total || 0) - Number(t.tax || 0));
+  const tax = t.tax != null ? Number(t.tax) : 0;
+  const total = t.total != null ? Number(t.total) : (Number(t.amount || 0) / 100);
+  const date = t.created_at ? new Date(t.created_at).toLocaleString() : new Date().toLocaleString();
+  const rows = items.map(i => `<tr><td style="padding:6px 0;color:#1F2937;font-size:14px">${escHtml(i.name)} &times;${Number(i.qty) || 1}</td><td style="padding:6px 0;text-align:right;color:#1F2937;font-size:14px;white-space:nowrap">$${(Number(i.price) * Number(i.qty)).toFixed(2)}</td></tr>`).join('');
+  return `<div style="background:#E3E9F2;padding:28px 12px;font-family:ui-monospace,Menlo,Consolas,'Courier New',monospace">
+    <div style="max-width:420px;margin:0 auto;background:#ffffff;border-radius:8px;overflow:hidden">
+      <div style="background:#0B1E3A;padding:18px;text-align:center">
+        <div style="color:#ffffff;font-weight:bold;font-size:16px;letter-spacing:.08em">${escHtml(head)}</div>
+        <div style="color:#9FB3D1;font-size:11px;margin-top:4px">RECEIPT</div>
+      </div>
+      <div style="padding:18px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;color:#6B7280">
+          <tr><td style="padding:2px 0">Receipt #</td><td style="text-align:right">${escHtml(t.reference || t.id || '')}</td></tr>
+          <tr><td style="padding:2px 0">Date</td><td style="text-align:right">${escHtml(date)}</td></tr>
+          ${t.cashier_name ? `<tr><td style="padding:2px 0">Cashier</td><td style="text-align:right">${escHtml(t.cashier_name)}</td></tr>` : ''}
+          ${t.payment_method ? `<tr><td style="padding:2px 0">Payment</td><td style="text-align:right;text-transform:uppercase">${escHtml(String(t.payment_method))}</td></tr>` : ''}
+        </table>
+        <hr style="border:none;border-top:1px dashed #D1D5DB;margin:14px 0">
+        <table style="width:100%;border-collapse:collapse">${rows}</table>
+        <hr style="border:none;border-top:1px dashed #D1D5DB;margin:14px 0">
+        <table style="width:100%;border-collapse:collapse;font-size:14px;color:#1F2937">
+          <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">$${Number(sub).toFixed(2)}</td></tr>
+          <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">$${Number(tax).toFixed(2)}</td></tr>
+          <tr><td style="padding:10px 0 2px;font-weight:bold;font-size:16px;border-top:1px dashed #D1D5DB">TOTAL</td><td style="text-align:right;font-weight:bold;font-size:16px;border-top:1px dashed #D1D5DB;padding:10px 0 2px">$${Number(total).toFixed(2)}</td></tr>
+        </table>
+        ${t.adyen_psp ? `<div style="margin-top:10px;font-size:11px;color:#6B7280">Auth code: ${escHtml(String(t.adyen_psp).slice(-8))}</div>` : ''}
+        <div style="margin-top:8px;display:inline-block;border:2px solid #0E7A5F;color:#0E7A5F;font-weight:bold;letter-spacing:.2em;padding:4px 14px;border-radius:6px;font-size:13px">${t.status ? escHtml(String(t.status).toUpperCase()) : 'PAID'}</div>
+        <div style="text-align:center;color:#6B7280;font-size:12px;margin-top:18px">${escHtml(foot)}<br><span style="color:#9CA3AF">${escHtml(store)}</span></div>
+      </div>
+    </div>
+  </div>`;
+}
+async function sendReceiptEmail(to, t){
+  const cfg = smtpConfig();
+  const mailer = getMailer();
+  if (!mailer){
+    const err = new Error('Email is not set up yet. Add SMTP_HOST, SMTP_USER and SMTP_PASS to your .env file (see README-EMAIL-RECEIPTS.txt), then restart the server.');
+    err.status = 503; throw err;
+  }
+  const s = getSettings(); const store = s.store_name || 'TapFlow';
+  const info = await mailer.sendMail({
+    from: cfg.from,
+    to,
+    subject: `Your ${store} receipt${t.reference ? ' — ' + t.reference : ''}`,
+    text: `Receipt ${t.reference || ''} — Total $${Number(t.total != null ? t.total : (Number(t.amount || 0) / 100)).toFixed(2)} — ${t.status || 'paid'}. ${s.receipt_footer || 'Thank you! Visit again'}`,
+    html: buildReceiptEmailHTML(t)
+  });
+  console.log('[email] receipt sent to', to, 'ref', t.reference || t.id || '', cfg.driver === 'json' ? '(debug jsonTransport)' : '');
+  return info;
+}
+const validEmail = e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e || ''));
+const rcptThrottle = new Map(); // qr session id -> last send ts (anti-abuse on the public endpoint)
+
+// Staff: email a receipt (by transaction id, or a direct receipt payload for Test Receipt / offline cash)
+app.post('/api/receipts/email', authRequired, async (req, res) => {
+  try{
+    const { transaction_id, email, receipt } = req.body || {};
+    const to = String(email || '').trim();
+    if (!validEmail(to)) return res.status(400).json({ error: 'A valid "email" address is required' });
+    let t = null;
+    if (transaction_id){
+      t = dbGet('SELECT * FROM transactions WHERE id=?', [transaction_id]);
+      if (!t) return res.status(404).json({ error: 'Transaction not found' });
+      try{ t.items = typeof t.items === 'string' ? JSON.parse(t.items) : t.items; }catch(e){ t.items = []; }
+    } else if (receipt && typeof receipt === 'object'){
+      t = receipt;
+    } else {
+      return res.status(400).json({ error: 'Provide "transaction_id" (or a "receipt" payload)' });
+    }
+    await sendReceiptEmail(to, t);
+    res.json({ ok: true, sent: true, to });
+  }catch(e){
+    console.error('[email] send failed:', e.message);
+    res.status(e.status || 500).json({ error: e.message || 'Failed to send email' });
+  }
+});
+
+// Customer (public): email themselves the receipt of a PAID QR order
+app.post('/api/qr/:id/email-receipt', async (req, res) => {
+  try{
+    const s = dbGet('SELECT * FROM qr_sessions WHERE id=?', [req.params.id]);
+    if (!s) return res.status(404).json({ error: 'Not found' });
+    if (s.status !== 'paid') return res.status(400).json({ error: 'This order is not paid yet' });
+    const to = String((req.body || {}).email || s.customer_email || '').trim();
+    if (!validEmail(to)) return res.status(400).json({ error: 'Enter a valid email address' });
+    const last = rcptThrottle.get(s.id) || 0;
+    if (Date.now() - last < 60000) return res.status(429).json({ error: 'This receipt was just emailed — please check the inbox (or wait a minute)' });
+    const t = dbGet('SELECT * FROM transactions WHERE qr_session_id=? ORDER BY created_at DESC LIMIT 1', [s.id]);
+    if (t){ try{ t.items = typeof t.items === 'string' ? JSON.parse(t.items) : t.items; }catch(e){ t.items = []; } }
+    const payload = t || {
+      reference: s.reference, amount: s.amount, currency: s.currency, status: 'captured',
+      payment_method: 'qr',
+      items: (()=>{ try{ return typeof s.items === 'string' ? JSON.parse(s.items) : (s.items || []); }catch(e){ return []; } })(),
+      created_at: s.created_at
+    };
+    await sendReceiptEmail(to, payload);
+    rcptThrottle.set(s.id, Date.now());
+    res.json({ ok: true, sent: true, to });
+  }catch(e){
+    console.error('[email] qr receipt failed:', e.message);
+    res.status(e.status || 500).json({ error: e.message || 'Failed to send email' });
+  }
+});
+
 // Health + adyen config check
-app.get('/api/health', (req,res)=> res.json({ ok:true, db: useJsonDb?'json':'sqlite', time: new Date().toISOString(), adyen: adyenConfig().configured ? 'configured' : 'not-configured' }));
+app.get('/api/health', (req,res)=> res.json({ ok:true, db: useJsonDb?'json':'sqlite', time: new Date().toISOString(), adyen: adyenConfig().configured ? 'configured' : 'not-configured', email: smtpConfig().configured ? 'configured' : 'not-configured' }));
 
 // Serve frontend for SPA routes
 app.get('/pay/:id', (req,res)=>{

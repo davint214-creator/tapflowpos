@@ -582,17 +582,50 @@ async function stripeTerminalPay({amountCents, terminalId}){
   <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal('terminalModal')">Cancel</button><button class="btn btn-primary" id="terminalCloseBtn" onclick="closeModal('terminalModal')" style="display:none">Close</button></div>
 </div></div>
 
-<div id="receiptModal" class="modal-bg"><div class="modal" style="max-width:420px">
-  <div class="modal-head"><h3>Receipt</h3><button class="btn btn-ghost btn-sm" onclick="closeModal('receiptModal')">✕</button></div>
-  <div class="modal-body"><div id="receiptBox" style="font-family:ui-monospace,Menlo,monospace;background:#fff;border:1px solid var(--border);border-radius:12px;padding:14px;font-size:12px;line-height:1.6"></div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px"><button class="btn btn-ghost btn-sm" onclick="window.print()">🖨️ Print</button><button class="btn btn-ghost btn-sm" onclick="emailReceipt()">✉️ Email</button></div>
-  <div style="margin-top:10px;background:#E6FFF9;border:1px solid #BFEDE3;border-radius:10px;padding:10px;font-size:11px;line-height:1.5"><b>Auto-print:</b> In Chrome, enable <b>silent printing</b> via kiosk: <span style="font-family:monospace">--kiosk-printing --print-to-default-printer</span> and we call <span style="font-family:monospace">window.print()</span> automatically on captured. For thermal printers (Star/Epson), use <b>QZ Tray</b> or connect via USB and select it as default — no extra app needed.</div>
+<div id="receiptModal" class="modal-bg"><div class="modal" style="max-width:440px">
+  <div class="modal-head"><h3>Receipt</h3>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button class="btn btn-ghost btn-sm" title="Email this receipt" onclick="emailReceipt()">✉️ Email</button>
+      <button class="btn btn-ghost btn-sm" title="Print this receipt" onclick="printReceipt()">🖨️ Print</button>
+      <button class="btn btn-ghost btn-sm" title="Close" onclick="closeModal('receiptModal')">✕</button>
+    </div>
   </div>
-  <div class="modal-foot"><button class="btn btn-primary" style="width:100%;justify-content:center" onclick="closeModal('receiptModal')">Done</button></div>
+  <div class="modal-body" style="background:#E3E9F2"><div id="receiptBox" class="rcpt-wrap"></div></div>
 </div></div>
 
+<div id="emailRcptModal" class="modal-bg"><div class="modal" style="max-width:380px">
+  <div class="modal-head"><h3>✉️ Email receipt</h3><button class="btn btn-ghost btn-sm" onclick="closeModal('emailRcptModal')">✕</button></div>
+  <div class="modal-body">
+    <label style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Send receipt to</label>
+    <input id="emailRcptTo" class="input" style="margin-top:6px" placeholder="customer@email.com">
+    <div id="emailRcptMsg" style="font-size:12px;margin-top:8px;line-height:1.5"></div>
+  </div>
+  <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal('emailRcptModal')">Cancel</button><button class="btn btn-primary" onclick="sendReceiptEmail()">Send</button></div>
+</div></div>
+
+<div id="printArea"></div>
+
 <div id="toastWrap" class="toast-wrap"></div>
-<style>@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(11,30,58,.25)}70%{box-shadow:0 0 0 16px rgba(11,30,58,0)}100%{box-shadow:0 0 0 0 rgba(11,30,58,0)}}</style>
+<style>@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(11,30,58,.25)}70%{box-shadow:0 0 0 16px rgba(11,30,58,0)}100%{box-shadow:0 0 0 0 rgba(11,30,58,0)}}
+/* ---- Realistic thermal receipt ---- */
+.rcpt-wrap{background:#E3E9F2;border-radius:10px;padding:24px 14px 28px;display:flex;justify-content:center}
+.rcpt{position:relative;width:100%;max-width:320px;background:#fff;color:#111;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Courier New',monospace;font-size:12px;line-height:1.55;padding:20px 16px 18px;box-shadow:0 8px 24px rgba(11,30,58,.18)}
+.rcpt::before,.rcpt::after{content:'';position:absolute;left:0;right:0;height:9px;background-repeat:repeat-x;background-size:16px 9px}
+.rcpt::before{top:-9px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='9'%3E%3Cpath d='M0 9L8 0l8 9z' fill='%23ffffff'/%3E%3C/svg%3E")}
+.rcpt::after{bottom:-9px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='9'%3E%3Cpath d='M0 0h16L8 9z' fill='%23ffffff'/%3E%3C/svg%3E")}
+.rcpt .rc-row{display:flex;align-items:baseline;gap:6px}
+.rcpt .rc-dots{flex:1;border-bottom:1px dotted #9aa4b0;margin-bottom:3px;min-width:12px}
+.rcpt .rc-line{border-top:1px dashed #9aa4b0;margin:10px 0}
+.rcpt .rc-paid{display:inline-block;border:2px solid #0E7A5F;color:#0E7A5F;font-weight:900;letter-spacing:.25em;padding:3px 12px 3px 14px;border-radius:6px;transform:rotate(-6deg);font-size:13px}
+.rcpt .rc-barcode{height:38px;margin:14px auto 3px;max-width:220px;background-color:#fff;background-image:repeating-linear-gradient(90deg,#111 0 2px,transparent 2px 3px),repeating-linear-gradient(90deg,#111 0 1px,transparent 1px 6px),repeating-linear-gradient(90deg,#111 0 3px,transparent 3px 11px)}
+/* Print ONLY the receipt paper — no buttons, no app chrome */
+#printArea{display:none}
+@media print{
+  body>*:not(#printArea){display:none!important}
+  #printArea{display:block!important}
+  #printArea .rcpt-wrap{background:#fff;padding:0;border-radius:0}
+  #printArea .rcpt{box-shadow:none;max-width:100%}
+}</style>
 
 <script>
 let token = localStorage.getItem('tapflow_token') || '';
@@ -606,7 +639,7 @@ let lastQRId = null;
 let settingsCache = null;
 
 function headers(){ return token ? { 'Authorization':'Bearer '+token, 'Content-Type':'application/json' } : { 'Content-Type':'application/json' }; }
-function api(path, opts={}){ opts.headers = { ...(opts.headers||{}), ...headers() }; if(opts.body && typeof opts.body==='object') opts.body = JSON.stringify(opts.body); return fetch(path, opts).then(async r=>{ const text = await r.text(); let data; try{ data=JSON.parse(text) }catch{ data={error:text} } if(!r.ok) { const e=new Error(data.error||data.message||('HTTP '+r.status)); e.code=data.code; e.details=data; e.status=r.status; throw e; } return data; }); }
+function api(path, opts={}){ opts.headers = { ...(opts.headers||{}), ...headers() }; if(opts.body && typeof opts.body==='object') opts.body = JSON.stringify(opts.body); return fetch(path, opts).then(async r=>{ const text = await r.text(); let data; try{ data=JSON.parse(text) }catch{ data={error:text} } if(!r.ok) { let m=data.error||data.message||('HTTP '+r.status); if(typeof m==='string' && m.indexOf('Cannot POST')>-1) m='This server build is missing '+path+' — upload the latest server.js (from the new zip) and restart the server.'; const e=new Error(m); e.code=data.code; e.details=data; e.status=r.status; throw e; } return data; }); }
 function toast(msg, type=''){ const w=document.getElementById('toastWrap'); const el=document.createElement('div'); el.className='toast '+(type||''); el.textContent=msg; w.appendChild(el); setTimeout(()=>{ el.style.opacity='0'; el.style.transform='translateY(4px)'; el.style.transition='.3s'; setTimeout(()=>el.remove(),300)}, 3600); }
 function setActiveNav(view){
   document.querySelectorAll('.nav a').forEach(a=>a.classList.remove('active'));
@@ -631,6 +664,7 @@ async function loadDashboard(){
     document.getElementById('dashTotalSub').textContent = `${d.totalTx||0} transactions • ${d.pending||0} pending`;
     // Charts
     drawBarChart('revenueChart', (d.daily||[]).map(x=>x.date.slice(5)), (d.daily||[]).map(x=>x.revenue), '#00C9A7');
+    document.getElementById('revenueLegend').innerHTML = (d.daily||[]).map(x=>`<div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;border-bottom:1px solid var(--border)"><span style="font-weight:700">${x.date.slice(5)}</span><span>$${Number(x.revenue).toFixed(2)} · ${x.count} sale${x.count===1?'':'s'}</span></div>`).join('') || '<span style="color:var(--muted)">No sales yet</span>';
     const methods = d.byMethod||{};
     drawDonut('methodChart', Object.keys(methods), Object.values(methods));
     document.getElementById('methodLegend').innerHTML = Object.entries(methods).map(([k,v])=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span>${k}</span><b>$${Number(v).toFixed(2)}</b></div>`).join('') || '<span style="color:var(--muted)">No payments yet</span>';
@@ -712,6 +746,7 @@ function go(view){
     document.getElementById('appShell').classList.remove('hidden'); document.getElementById('view-login').classList.remove('active'); document.getElementById('view-login').style.display='none';
   }
   setActiveNav(view);
+  if(view==='dashboard') loadDashboard();
   if(view!=='pay') history.replaceState(null,'','#'+view);
   if(view==='overview'){ /* no fetch */ }
   if(view==='pos') { if(products.length===0) fetchProducts(); else renderProducts(); }
@@ -898,11 +933,11 @@ async function handleCharge(){
       if(resp.status==='captured' || resp.ok){
         closeModal('terminalModal');
         toast('Payment captured — printing receipt','ok');
-        showReceiptFromTx(resp.transaction);
+        showReceiptFromTx(resp.transaction,{autoPrint:true});
         clearCart();
         fetchTransactions();
         fetchProducts();
-        setTimeout(()=>{ try{ window.print(); }catch{} }, 600);
+        if(isManager()) loadDashboard();
       } else {
         throw new Error('Payment not captured: '+(resp.status||'unknown'));
       }
@@ -974,13 +1009,14 @@ async function handleCharge(){
         const qr=await api('/api/qr/create',{method:'POST', body:{amount:amountCents, items:cart, customerEmail:customer.email}});
         await api('/api/qr/'+qr.id+'/mark-paid',{method:'POST'});
         toast('Cash sale recorded — receipt printing','ok');
-        showReceiptFromTx({reference:qr.reference, items:cart, subtotal, tax, total, payment_method:'cash', created_at:new Date().toISOString()});
+        showReceiptFromTx({reference:qr.reference, items:cart, subtotal, tax, total, payment_method:'cash', cashier_name:me?me.name:'', created_at:new Date().toISOString()},{autoPrint:true});
         clearCart(); fetchTransactions(); fetchProducts();
-        setTimeout(()=>{ try{ window.print()}catch{} },400);
+        if(isManager()) loadDashboard();
         return;
       }
-      showReceiptFromTx(resp.data.transaction);
+      showReceiptFromTx(resp.data.transaction,{autoPrint:true});
       clearCart(); fetchTransactions(); fetchProducts();
+      if(isManager()) loadDashboard();
     }catch(e){ toast(e.message,'err') }
     return;
   }
@@ -1011,7 +1047,7 @@ async function saveProduct(){
   try{
     if(editingProductId) await api('/api/products/'+editingProductId,{method:'PUT', body});
     else await api('/api/products',{method:'POST', body});
-    closeModal('productModal'); fetchProducts(); toast('Product saved ♾️','ok');
+    closeModal('productModal'); fetchProducts(); renderQRCartPreview(); toast('Product saved — ready in POS & Stripe checkout (no extra steps)','ok');
   }catch(e){ toast(e.message,'err') }
 }
 async function deleteProduct(id){ if(!confirm('Delete this product?')) return; try{ await api('/api/products/'+id,{method:'DELETE'}); fetchProducts(); toast('Deleted','ok'); }catch(e){ toast(e.message,'err') } }
@@ -1055,30 +1091,78 @@ function exportCSV(){
     const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='tapflow-transactions.csv'; a.click(); URL.revokeObjectURL(url); toast('CSV exported','ok');
   });
 }
-function showReceiptFromTx(t){
+let lastReceiptTx=null;
+function rcEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function renderReceiptHTML(t){
+  t=t||{};
   const store=settingsCache?.store_name||'TapFlow Park';
   const head=settingsCache?.receipt_header||store;
   const foot=settingsCache?.receipt_footer||'Thank you! Visit again';
   const date=t.created_at? new Date(t.created_at).toLocaleString(): new Date().toLocaleString();
-  const items=(t.items||[]).map(i=>`<div style="display:flex;justify-content:space-between"><span>${i.name} ×${i.qty}</span><b>$${(Number(i.price)*Number(i.qty)).toFixed(2)}</b></div>`).join('');
+  const items=(typeof t.items==='string'?(()=>{try{return JSON.parse(t.items)}catch(e){return[]}})():t.items)||[];
+  const rows=items.map(i=>`<div class="rc-row"><span>${rcEsc(i.name)} ×${Number(i.qty)||1}</span><span class="rc-dots"></span><b>$${(Number(i.price)*Number(i.qty)).toFixed(2)}</b></div>`).join('')||'<div style="text-align:center;color:#666">(no items)</div>';
   const sub=t.subtotal!=null? Number(t.subtotal).toFixed(2) : (Number(t.total||0) - Number(t.tax||0)).toFixed(2);
   const tax=t.tax!=null? Number(t.tax).toFixed(2) : '0.00';
   const total=t.total!=null? Number(t.total).toFixed(2) : (Number(t.amount)/100).toFixed(2);
-  document.getElementById('receiptBox').innerHTML=`
-    <div style="text-align:center;border-bottom:1px dashed var(--border);padding-bottom:10px"><b style="font-size:14px">${head}</b><br><span style="font-size:10px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase">${store} • ${date}</span><br><span style="font-size:10px;color:var(--muted)">${t.reference||''} • ${t.payment_method||''} • ${t.cashier_name||''}</span></div>
-    <div style="margin-top:10px;display:flex;flex-direction:column;gap:4px">${items}</div>
-    <div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;display:flex;flex-direction:column;gap:4px">
-      <div style="display:flex;justify-content:space-between"><span>Subtotal</span><b>$${sub}</b></div>
-      <div style="display:flex;justify-content:space-between"><span>Tax</span><b>$${tax}</b></div>
-      <div style="display:flex;justify-content:space-between;font-weight:900;font-size:14px;border-top:1px dashed var(--border);padding-top:6px;margin-top:6px"><span>Total</span><span>$${total}</span></div>
-      <div style="display:flex;justify-content:space-between;margin-top:6px;background:#F8F9FB;border:1px solid var(--border);border-radius:8px;padding:8px"><span style="font-size:11px;font-weight:700">Status: ${(t.status||'captured').toUpperCase()}</span><span style="font-size:11px">${t.adyen_psp? 'PSP '+t.adyen_psp.slice(-8):''}</span></div>
-      <div style="text-align:center;margin-top:10px;font-size:10px;color:var(--muted)">${foot}<br>Receipt #${t.reference||t.id}</div>
-    </div>`;
+  const ref=t.reference||t.id||'';
+  const captured=(t.status||'captured')==='captured';
+  return `<div class="rcpt">
+    <div style="text-align:center">
+      <div style="font-weight:900;font-size:15px;letter-spacing:.04em">${rcEsc(head)}</div>
+      <div style="font-size:10px;color:#555;margin-top:2px">${rcEsc(store)}</div>
+      <div style="font-size:10px;color:#555;margin-top:6px">${rcEsc(date)}</div>
+    </div>
+    <div class="rc-line"></div>
+    <div class="rc-row" style="font-size:10px;color:#555"><span>Receipt #${rcEsc(ref)}</span><span class="rc-dots"></span><span>Cashier: ${rcEsc(t.cashier_name||'—')}</span></div>
+    <div class="rc-line"></div>
+    ${rows}
+    <div class="rc-line"></div>
+    <div class="rc-row"><span>Subtotal</span><span class="rc-dots"></span><span>$${sub}</span></div>
+    <div class="rc-row"><span>Tax</span><span class="rc-dots"></span><span>$${tax}</span></div>
+    <div class="rc-row" style="font-weight:900;font-size:15px;margin-top:6px"><span>TOTAL</span><span class="rc-dots"></span><span>$${total}</span></div>
+    <div class="rc-line"></div>
+    <div class="rc-row"><span>Payment</span><span class="rc-dots"></span><span style="text-transform:uppercase">${rcEsc(t.payment_method||'card')}</span></div>
+    ${t.adyen_psp?`<div class="rc-row"><span>Auth code</span><span class="rc-dots"></span><span>${rcEsc(String(t.adyen_psp).slice(-8))}</span></div>`:''}
+    <div style="text-align:center;margin-top:12px"><span class="rc-paid">${captured?'PAID':'VOID'}</span></div>
+    <div class="rc-barcode"></div>
+    <div style="text-align:center;font-size:9px;letter-spacing:.18em;color:#333">${rcEsc(ref)}</div>
+    <div style="text-align:center;margin-top:10px;font-size:11px;color:#333">${rcEsc(foot)}</div>
+    <div style="text-align:center;font-size:9px;color:#777;margin-top:4px">${rcEsc(store)} — keep this receipt for your records</div>
+  </div>`;
+}
+function showReceiptFromTx(t,opts={}){
+  lastReceiptTx=t||null;
+  document.getElementById('receiptBox').innerHTML=renderReceiptHTML(t);
   openModal('receiptModal');
-  setTimeout(()=>{ if(t.status==='captured'){ try{ window.print(); }catch{} } }, 500);
+  if(opts.autoPrint) setTimeout(()=>{ try{ printReceipt(); }catch(e){} }, 550);
+}
+function printReceipt(){
+  const box=document.getElementById('receiptBox'); if(!box || !box.innerHTML) return;
+  document.getElementById('printArea').innerHTML='<div class="rcpt-wrap">'+box.innerHTML+'</div>';
+  window.print();
 }
 function openReceiptPreview(){ showReceiptFromTx({reference:'PREVIEW-'+Date.now().toString(36).toUpperCase(), items:[{name:'Day Pass Adult',price:29,qty:1},{name:'Burger Combo',price:12.5,qty:2}], subtotal:54, tax:4.59, total:58.59, status:'captured', payment_method:'preview', cashier_name:me?me.name:'Test', created_at:new Date().toISOString(), adyen_psp:'-preview'}); }
-function emailReceipt(){ toast('Email receipt: connect SendGrid/Mailgun in server.js → nodemailer to send on captured','ok') }
+function emailReceipt(){
+  if(!lastReceiptTx){ toast('No receipt to email — open a receipt first','err'); return; }
+  const inp=document.getElementById('emailRcptTo');
+  inp.value=lastReceiptTx.customer_email||document.getElementById('custEmail')?.value||'';
+  document.getElementById('emailRcptMsg').textContent='';
+  openModal('emailRcptModal');
+  setTimeout(()=>inp.focus(),50);
+}
+async function sendReceiptEmail(){
+  const to=document.getElementById('emailRcptTo').value.trim();
+  const msg=document.getElementById('emailRcptMsg');
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)){ msg.innerHTML='<span style="color:#B3261E">Enter a valid email address</span>'; return; }
+  msg.textContent='Sending…';
+  try{
+    const body=lastReceiptTx.id? {transaction_id:lastReceiptTx.id, email:to} : {email:to, receipt:lastReceiptTx};
+    await api('/api/receipts/email',{method:'POST', body});
+    msg.innerHTML='<span style="color:#0E7A5F">✓ Receipt sent to '+rcEsc(to)+'</span>';
+    toast('Receipt emailed to '+to,'ok');
+    setTimeout(()=>closeModal('emailRcptModal'),1400);
+  }catch(e){ msg.innerHTML='<span style="color:#B3261E">'+rcEsc(e.message)+'</span>'; }
+}
 
 // QR
 function renderQRCartPreview(){
@@ -1155,7 +1239,7 @@ async function loadPaySession(){
       document.getElementById('payAdyenMount').innerHTML='<div style="background:#E6FFF9;border:1px solid #BFEDE3;border-radius:12px;padding:12px"><b>Adyen Drop-in</b><div style="font-size:12px;color:#007A65;margin-top:4px">Your Adyen Client Key is configured. To mount the real Drop-in, add the Adyen Web SDK script and initialize with session ID <span style="font-family:monospace">'+adyenData.id+'</span>. See Settings → Payments for snippet.</div><div style="font-family:monospace;background:#0B1E3A;color:#CDE8FF;padding:10px;border-radius:10px;margin-top:10px;font-size:11px">const checkout = await AdyenCheckout({clientKey: "'+cfg.adyen_client_key.slice(0,12)+'…", environment:"'+cfg.adyen_env+'", session: '+JSON.stringify(adyenData).slice(0,200)+'...});<br>checkout.create("dropin").mount("#payAdyenMount");</div></div>';
     } else {
       // Fallback: show instructions or test pay button (only for test, logged)
-      if(s.status==='paid'){ document.getElementById('payAdyenMount').innerHTML='<div style="background:#E6FFF9;border:1px solid #BFEDE3;border-radius:12px;padding:16px;text-align:center"><b style="color:#007A65;font-size:16px">✓ Paid — show this to cashier</b><div style="font-size:12px;color:var(--muted)">Reference '+s.reference+'</div></div>'; }
+      if(s.status==='paid'){ showCustomerPaidReceipt(s); }
       else if(s.status==='pending'){
         document.getElementById('payFallback').innerHTML='<div style="background:#FFF4CC;border:1px solid #FFE8A8;border-radius:12px;padding:12px"><b>Demo checkout (Adyen not configured)</b><p style="font-size:12px;color:#7A5A00;margin-top:4px">To accept real cards, configure Adyen in Settings. For testing without Adyen, a staff member can confirm receipt of cash/other method via the POS → QR → “Confirm Paid” button (logged).</p><div style="font-size:11px;color:var(--muted);margin-top:6px">QR: '+location.origin+'/pay/'+s.id+'</div></div>';
       } else {
@@ -1179,9 +1263,9 @@ function startPollingQR(id){
         // find transaction for this qr
         const txs=await api('/api/transactions');
         const tx=txs.find(t=>t.qr_session_id===id);
-        if(tx) showReceiptFromTx(tx);
+        if(tx) showReceiptFromTx(tx,{autoPrint:true});
         fetchTransactions(); fetchProducts();
-        setTimeout(()=>{ try{ window.print()}catch{} },500);
+        if(isManager()) loadDashboard();
       } else if(s.status==='expired'){
         clearInterval(qPoll);
         document.getElementById('qrStatusBadge').textContent='Expired';
@@ -1201,6 +1285,36 @@ async function fetchQRSessions(){
     // Also show pending QR sessions that have not yet become transactions - we can fetch each pending via local storage of last QRs
     tbody.innerHTML=qrTxs.slice(0,10).map(t=>`<tr><td>${new Date(t.created_at).toLocaleString()}</td><td style="font-family:monospace;font-size:11px">${t.reference}</td><td><b>$${Number(t.total).toFixed(2)}</b></td><td><span class="badge badge-teal">${t.status}</span></td><td><a href="/pay/${t.qr_session_id}" target="_blank" style="color:var(--teal2);font-weight:700">/pay/${t.qr_session_id.slice(0,8)}…</a></td><td><button class="btn btn-ghost btn-sm" onclick="window.open('/pay/${t.qr_session_id}','_blank')">Open</button></td></tr>`).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted)">No QR payments yet</td></tr>';
   }catch(e){}
+}
+
+// Customer QR paid view: real receipt + email-me-the-receipt form (no buttons on the receipt itself)
+async function showCustomerPaidReceipt(s){
+  try{ if(!settingsCache) settingsCache = await fetch('/api/settings').then(r=>r.json()); }catch(e){}
+  const items=(()=>{ try{ return typeof s.items==='string'? JSON.parse(s.items): (s.items||[]); }catch(e){ return []; } })();
+  const subtotal=items.reduce((a,i)=>a+Number(i.price)*Number(i.qty),0);
+  const taxRate=Number(settingsCache?.tax_rate||8.5);
+  const tax=subtotal*(taxRate/100);
+  const total=s.amount? Number(s.amount)/100 : subtotal+tax;
+  const manual=(s.adyen_session_data||'').includes('manualMark');
+  const tx={reference:s.reference, items, subtotal, tax, total, status:'captured', payment_method: manual?'qr (confirmed in store)':'card (online)', created_at:s.created_at};
+  document.getElementById('payAdyenMount').innerHTML=
+    '<div style="background:#E6FFF9;border:1px solid #BFEDE3;border-radius:12px;padding:10px 12px;text-align:center;margin-bottom:12px"><b style="color:#007A65;font-size:16px">✓ Paid — thank you!</b><div style="font-size:12px;color:var(--muted)">Show the confirmation to staff if asked · Ref '+rcEsc(s.reference)+'</div></div>'
+    +'<div class="rcpt-wrap" style="margin-bottom:14px">'+renderReceiptHTML(tx)+'</div>'
+    +'<div style="background:#fff;border:1px solid var(--border);border-radius:12px;padding:12px"><label style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Email this receipt to me</label>'
+    +'<div style="display:flex;gap:8px;margin-top:6px"><input id="payRcptEmail" class="input" placeholder="you@email.com" style="flex:1"><button class="btn btn-primary btn-sm" onclick="sendCustomerReceipt(\''+s.id+'\')">Send</button></div>'
+    +'<div id="payRcptMsg" style="font-size:12px;margin-top:6px"></div></div>';
+}
+async function sendCustomerReceipt(id){
+  const inp=document.getElementById('payRcptEmail'); const msg=document.getElementById('payRcptMsg');
+  const to=(inp.value||'').trim();
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)){ msg.innerHTML='<span style="color:#B3261E">Enter a valid email address</span>'; return; }
+  msg.textContent='Sending…';
+  try{
+    const r=await fetch('/api/qr/'+id+'/email-receipt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:to})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(d.error||('HTTP '+r.status));
+    msg.innerHTML='<span style="color:#0E7A5F">✓ Sent! Check '+rcEsc(to)+'</span>';
+  }catch(e){ msg.innerHTML='<span style="color:#B3261E">'+rcEsc(e.message)+'</span>'; }
 }
 
 // Users
@@ -1374,6 +1488,8 @@ document.querySelectorAll('.modal-bg').forEach(m=> m.addEventListener('click', e
   if(hashView && document.getElementById('view-'+hashView)){ go(hashView); return; }
   if(!me){ go('overview'); }
   else { showApp(); }
+// Live dashboard: refresh graphs every 20s while the manager is looking at them (picks up QR/Stripe/webhook sales too)
+setInterval(()=>{ try{ if(me && isManager() && document.getElementById('view-dashboard').classList.contains('active')) loadDashboard(); }catch(e){} }, 20000);
 })();
 
 // Sync header company name from settings

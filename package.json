@@ -22,7 +22,8 @@
     "express-rate-limit": "^7.1.5",
     "morgan": "^1.10.0",
     "@adyen/api-library": "^17.0.0",
-    "node-fetch": "^2.6.12"
+    "node-fetch": "^2.6.12",
+    "nodemailer": "^6.9.16"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"
