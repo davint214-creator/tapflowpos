@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: tapflow-pos
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADYEN_ENVIRONMENT
+        value: test

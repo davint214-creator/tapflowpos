@@ -1,0 +1,9 @@
+TapFlow POS - Quick Install (no business info needed)
+1) unzip tapflow-pos.zip
+2) npm install
+3) node server.js -> http://localhost:3000
+Logins: admin@tapflow.local/Admin123! manager@tapflow.local/Manager123! employee@tapflow.local/Employee123! arcade@tapflow.local/Arcade123! (Arcade Crew)
+Cash & QR work now. Adyen import later: Settings -> Payments -> Import JSON (apiKey/merchantAccount/clientKey/hmacKey/terminalId/env)
+RFID: plug USB RFID pad -> POS uses same DB -> Arcade Cards page -> tap card -> Load $ -> balance updates -> transaction logged.
+Unlimited: Settings -> Products -> New/Edit -> tick Unlimited checkbox -> never decrements.
+Hosting free: Cloudflare Pages+D1 (all features) or GitHub Pages + Render backend. See CLOUDFLARE.md / README.md

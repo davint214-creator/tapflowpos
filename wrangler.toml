@@ -1,0 +1,15 @@
+name = "tapflow-pos"
+main = "server.js"
+compatibility_date = "2024-01-01"
+
+# For Cloudflare Pages + Functions (free, keeps all features)
+# This runs your same Node server as a Worker via Cloudflare's D1 SQLite
+
+[env.production]
+# Add these in Cloudflare dashboard → Settings → Variables
+# JWT_SECRET, ADYEN_API_KEY, etc.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tapflow"
+database_id = "replace-with-your-d1-id"
