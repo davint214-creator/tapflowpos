@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TapFlow — POS & Payments</title>
+<title>TapFlow POS — Stripe Online • POS & Payments</title>
 <style>
 :root{--navy:#0B1E3A;--navy2:#132E5A;--teal:#00C9A7;--teal2:#00A88A;--orange:#FF6B35;--bg:#F4F6FB;--card:#fff;--muted:#6B7A90;--border:#E6EAF2;--red:#E23B3B;--radius:16px;--shadow:0 10px 30px rgba(11,30,58,.08)}
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--navy);line-height:1.5}button{font:inherit;cursor:pointer}a{color:inherit;text-decoration:none}
@@ -325,6 +325,7 @@
             <div class="pay-grid" style="margin-top:8px">
               <button class="pay-card" id="pay-terminal" onclick="selectPay('terminal')"><span style="font-size:18px">💳</span><b style="font-size:12px">Adyen Reader</b><span style="font-size:11px;color:var(--muted)">Chip / Tap / Swipe</span></button>
               <button class="pay-card" id="pay-qr" onclick="selectPay('qr')"><span style="font-size:18px">🔗</span><b style="font-size:12px">QR Checkout</b><span style="font-size:11px;color:var(--muted)">Customer scans & pays</span></button>
+              <button class="pay-card" id="pay-stripe" onclick="selectPay('stripe')"><span style="font-size:18px">💜</span><b style="font-size:12px">Stripe Online</b><span style="font-size:11px;color:var(--muted)">Card link — test mode</span></button>
               <button class="pay-card" id="pay-cash" onclick="selectPay('cash')"><span style="font-size:18px">💵</span><b style="font-size:12px">Cash</b><span style="font-size:11px;color:var(--muted)">Record cash tender</span></button>
               <button class="pay-card" id="pay-manual" onclick="selectPay('manual')"><span style="font-size:18px">⌨️</span><b style="font-size:12px">Card on file</b><span style="font-size:11px;color:var(--muted)">Keyed / MOTO</span></button>
             </div>
@@ -463,6 +464,14 @@
             <div class="grid2">
               <label style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Environment<select id="cfgEnv" class="input"><option value="test">test</option><option value="live">live</option></select></label>
               <label style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Terminal ID (for POS)<input id="cfgTerminal" class="input" placeholder="P400Plus-... or S1E-..."></label>
+            </div>
+            <div style="margin-top:4px;background:#F6F5FF;border:1px solid #D9D2FF;border-radius:12px;padding:12px">
+              <b style="font-size:12px">💜 Stripe — online card payments (test mode ready)</b>
+              <p style="font-size:12px;color:#4A3E8C;line-height:1.6;margin-top:4px">Add a <b>sk_test</b> key and the POS gets a <b>Stripe Online</b> payment option: the customer scans the QR / opens the link and pays by card on Stripe's secure page. Get keys at <b>dashboard.stripe.com/test/apikeys</b>. Test card: <b>4242 4242 4242 4242</b> — any future expiry, any CVC. When your Stripe account is activated, switch to sk_live here.</p>
+              <div style="display:grid;gap:10px;margin-top:10px">
+                <label style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Stripe Secret Key<input id="cfgStripeSecret" class="input" placeholder="sk_test_... from dashboard.stripe.com/test/apikeys"></label>
+                <label style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Stripe Publishable Key<input id="cfgStripePub" class="input" placeholder="pk_test_..."></label>
+              </div>
             </div>
             <div style="background:#E6FFF9;border:1px solid #BFEDE3;border-radius:12px;padding:12px">
               <b style="font-size:12px">What you need from Adyen</b>
@@ -859,7 +868,7 @@ function cartTotals(){
 function updateCharge(){
   const {total}=cartTotals();
   const btn=document.getElementById('chargeBtn');
-  const labels={terminal:'Charge on Adyen Reader →', qr:'Generate QR for Customer →', cash:'Record Cash Payment →', manual:'Charge Card on File →'};
+  const labels={terminal:'Charge on Adyen Reader →', qr:'Generate QR for Customer →', stripe:'Send Stripe Payment Link →', cash:'Record Cash Payment →', manual:'Charge Card on File →'};
   btn.textContent=cart.length? `${labels[selectedPay]||'Charge'} $${total.toFixed(2)}` : 'Add items to cart';
   btn.disabled=cart.length===0;
 }
@@ -927,6 +936,27 @@ async function handleCharge(){
       go('qr');
       startPollingQR(resp.id);
       toast('QR generated — show to customer','ok');
+    }catch(e){ toast(e.message,'err') }
+    return;
+  }
+
+  if(selectedPay==='stripe'){
+    try{
+      const resp=await api('/api/stripe/checkout',{method:'POST', body:{amount:amountCents, currency:(settingsCache?.currency||'USD'), items:cart, customerEmail: customer.email }});
+      lastQRId=resp.id;
+      document.getElementById('qrImg').src=resp.qrDataUrl;
+      document.getElementById('qrImg').style.display='block';
+      document.getElementById('qrPlaceholder').style.display='none';
+      document.getElementById('qrLinkWrap').style.display='block';
+      document.getElementById('qrLink').href=resp.payUrl;
+      document.getElementById('qrLink').textContent='Stripe Checkout — customer pays by card';
+      document.getElementById('qrStatusBadge').textContent='Pending — waiting for customer';
+      document.getElementById('qrStatusBadge').className='badge badge-warn';
+      document.getElementById('qrPollRow').style.display='flex';
+      document.getElementById('qrAdyenNotice').innerHTML='<div style="background:#F6F5FF;border:1px solid #D9D2FF;border-radius:10px;padding:10px"><b>💜 Stripe Checkout ready</b><div style="font-size:11px;color:#4A3E8C;margin-top:4px">Customer scans and pays by card on Stripe. This screen flips to <b>Paid</b> automatically — verified with Stripe every few seconds.</div></div>';
+      go('qr');
+      startPollingQR(resp.id);
+      toast('Stripe payment link ready — show QR to customer','ok');
     }catch(e){ toast(e.message,'err') }
     return;
   }
@@ -1105,6 +1135,18 @@ async function loadPaySession(){
     const items=s.items||[];
     document.getElementById('payItems').innerHTML=items.map(i=>`<div style="display:flex;justify-content:space-between"><span>${i.name} ×${i.qty}</span><b>$${(Number(i.price)*Number(i.qty)).toFixed(2)}</b></div>`).join('') || '<span style="color:var(--muted)">No items</span>';
     document.getElementById('payTotal').textContent='Total $'+(s.amount/100).toFixed(2);
+    // Stripe online sessions: pay-by-card button + verify on return from Stripe
+    const sd=(s.adyen_session_data && s.adyen_session_data.stripe) ? s.adyen_session_data.stripe : null;
+    const usp=new URLSearchParams(location.search);
+    if(usp.get('stripe')==='return' && s.status==='pending'){
+      try{ await fetch('/api/stripe/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:s.id})}); }catch(e){}
+      location.replace('/pay/'+s.id);
+      return;
+    }
+    if(sd && s.status==='pending'){
+      document.getElementById('payAdyenMount').innerHTML='';
+      document.getElementById('payFallback').innerHTML='<div style="background:#F6F5FF;border:1px solid #D9D2FF;border-radius:12px;padding:16px;text-align:center"><b style="font-size:15px">Ready to pay $'+(s.amount/100).toFixed(2)+'</b><div style="margin-top:10px"><a href="'+sd.url+'" style="display:inline-block;background:#635BFF;color:#fff;font-weight:800;padding:12px 22px;border-radius:12px;text-decoration:none">Pay by card →</a></div><div style="font-size:11px;color:var(--muted);margin-top:8px">Secure checkout powered by Stripe</div></div>';
+    }
     // If Adyen session available, mount Drop-in
     const cfg=await fetch('/api/settings').then(r=>r.json());
     const adyenData=s.adyen_session_data;
@@ -1199,6 +1241,8 @@ async function loadSettings(){
     document.getElementById('cfgCurrency').value=s.currency||'USD';
     document.getElementById('cfgReceiptHead').value=s.receipt_header||'';
     document.getElementById('cfgReceiptFoot').value=s.receipt_footer||'';
+    document.getElementById('cfgStripeSecret').value=s.stripe_secret_key||'';
+    document.getElementById('cfgStripePub').value=s.stripe_publishable_key||'';
     document.getElementById('adyenStatusBadge').textContent = s.adyen_api_key && s.adyen_merchant_account ? 'Active • '+s.adyen_env : 'Cash Ready • Add card readers when ready';
     document.getElementById('adyenStatusBadge').className = 'badge badge-teal';
     updateAdyenBadge();
@@ -1217,6 +1261,8 @@ async function saveSettings(){
     currency:document.getElementById('cfgCurrency').value.trim()||'USD',
     receipt_header:document.getElementById('cfgReceiptHead').value.trim(),
     receipt_footer:document.getElementById('cfgReceiptFoot').value.trim(),
+    stripe_secret_key:document.getElementById('cfgStripeSecret').value.trim(),
+    stripe_publishable_key:document.getElementById('cfgStripePub').value.trim(),
   };
   try{ await api('/api/settings',{method:'PUT', body}); toast('Settings saved','ok'); document.getElementById('cfgMsg').style.display='block'; document.getElementById('cfgMsg').textContent='Saved — Adyen will be used for next payment.'; document.getElementById('cfgMsg').style.color='#0A9B7A'; updateAdyenBadge(); if(body.adyen_terminal_id) { localStorage.setItem('tapflow_terminal', body.adyen_terminal_id); document.getElementById('terminalIdInput').value=body.adyen_terminal_id; } }catch(e){ toast(e.message,'err') }
 }
